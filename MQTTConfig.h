@@ -473,6 +473,9 @@ void readSettingsFromConfig() {
           DEBUG_PRINTLN(F("Restarting Web Server..."));  // Restart the web server now it's on WiFi
           wifiManager.stopWebPortal();
           wifiManager.startWebPortal();
+          MDNS.end();
+          MDNS.begin("heatpump");
+          MDNS.addService("http", "tcp", 80);
         }
 #endif
       }

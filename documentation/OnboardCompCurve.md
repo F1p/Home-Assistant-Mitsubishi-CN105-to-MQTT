@@ -222,6 +222,7 @@ Sending the payload to the following endpoints, for either current temperature z
 
 
 
+
 ### Sending Offsets & Outdoor Temperatures
 
 In a similar way, you can make modification to the Offsets (+/- of the calculated Flow Setpoint) by sending JSON: 
