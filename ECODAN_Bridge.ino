@@ -1582,9 +1582,10 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
         DEBUG_PRINTLN("SetTempSetpoint");
         AC.SetTempSetpoint(doc["SetTempSetpoint"], AC.Status.tempMode);
 
-        // Optimistic HA
-        if (AC.Status.tempMode) {
-          AC.Status.Temperature = (AC.lookupByteMapIndex(AC.TEMP_MAP, 16, doc["SetTempSetpoint"]), AC.Status.tempMode);
+        // Optimistic HA - echo the new setpoint immediately (mirrors SetpointTemp in the AC status report).
+        // Temperature holds a TEMP_MAP index when !tempMode and a raw degC float when tempMode.
+        if (!AC.Status.tempMode) {
+          AC.Status.Temperature = AC.lookupByteMapIndex(AC.TEMP_MAP, 16, doc["SetTempSetpoint"]);
         } else {
           AC.Status.Temperature = doc["SetTempSetpoint"].as<float>();
         }
