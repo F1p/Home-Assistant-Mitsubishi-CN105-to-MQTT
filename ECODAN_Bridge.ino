@@ -1558,26 +1558,36 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
         bool systempower = doc["systempower"];
         AC.SetSystemPowerMode(systempower);
         AC.Status.SystemPowerMode = systempower ? 0x01 : 0x00;  // Optimistic HA
+        AC.Status.PendingPower = AC.Status.SystemPowerMode;
+        AC.Status.PendingPowerUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetMode"].is<const char*>()) {
         DEBUG_PRINTLN("SetMode");
         AC.SetMode(doc["SetMode"]);
-        AC.Status.Buffer04 = AC.MODE[AC.lookupByteMapIndex(AC.MODE_MAP, 5, doc["SetMode"])];  // Optimistic HA
+        AC.Status.PendingMode = AC.MODE[AC.lookupByteMapIndex(AC.MODE_MAP, 5, doc["SetMode"])];
+        AC.Status.Buffer04 = AC.Status.isee ? AC.Status.PendingMode + 0x08 : AC.Status.PendingMode;  // Optimistic HA (keep the i-See offset the report decode expects)
+        AC.Status.PendingModeUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetFanSpeed"].is<const char*>()) {
         DEBUG_PRINTLN("SetFan");
         AC.SetFanSpeed(doc["SetFanSpeed"]);
         AC.Status.fan = AC.FAN[AC.lookupByteMapIndex(AC.FAN_MAP, 6, doc["SetFanSpeed"])];  // Optimistic HA
+        AC.Status.PendingFan = AC.Status.fan;
+        AC.Status.PendingFanUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetVane"].is<const char*>()) {
         DEBUG_PRINTLN("SetVane");
         AC.SetVane(doc["SetVane"]);
         AC.Status.vane = AC.VANE[AC.lookupByteMapIndex(AC.VANE_MAP, 7, doc["SetVane"])];  // Optimistic HA
+        AC.Status.PendingVane = AC.Status.vane;
+        AC.Status.PendingVaneUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetWideVane"].is<const char*>()) {
         DEBUG_PRINTLN("SetWideVane");
         AC.SetWideVane(doc["SetWideVane"]);
         AC.Status.wideVane = AC.WIDEVANE[AC.lookupByteMapIndex(AC.WIDEVANE_MAP, 7, doc["SetWideVane"])];  // Optimistic HA
+        AC.Status.PendingWideVane = AC.Status.wideVane;
+        AC.Status.PendingWideVaneUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetTempSetpoint"].is<float>()) {
         DEBUG_PRINTLN("SetTempSetpoint");
@@ -1589,6 +1599,8 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
         } else {
           AC.Status.Temperature = doc["SetTempSetpoint"].as<float>();
         }
+        AC.Status.PendingTemperature = AC.Status.Temperature;
+        AC.Status.PendingTempUntil = millis() + AC_PENDING_HOLD_MS;
       }
       if (doc["SetRemoteTemp"].is<float>()) {
         DEBUG_PRINTLN("SetRemoteTemp");
