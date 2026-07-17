@@ -1563,10 +1563,23 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       }
       if (doc["SetMode"].is<const char*>()) {
         DEBUG_PRINTLN("SetMode");
-        AC.SetMode(doc["SetMode"]);
-        AC.Status.PendingMode = AC.MODE[AC.lookupByteMapIndex(AC.MODE_MAP, 5, doc["SetMode"])];
-        AC.Status.Buffer04 = AC.Status.isee ? AC.Status.PendingMode + 0x08 : AC.Status.PendingMode;  // Optimistic HA (keep the i-See offset the report decode expects)
-        AC.Status.PendingModeUntil = millis() + AC_PENDING_HOLD_MS;
+        if (doc["SetMode"] == "off") {  // HA "off" mode = system power off; the unit's mode register is untouched
+          AC.SetSystemPowerMode(false);
+          AC.Status.SystemPowerMode = 0x00;  // Optimistic HA
+          AC.Status.PendingPower = 0x00;
+          AC.Status.PendingPowerUntil = millis() + AC_PENDING_HOLD_MS;
+        } else {
+          if (AC.Status.SystemPowerMode == 0x00) {  // Selecting a mode while off powers the unit on (HA climate semantic)
+            AC.SetSystemPowerMode(true);
+            AC.Status.SystemPowerMode = 0x01;  // Optimistic HA
+            AC.Status.PendingPower = 0x01;
+            AC.Status.PendingPowerUntil = millis() + AC_PENDING_HOLD_MS;
+          }
+          AC.SetMode(doc["SetMode"]);
+          AC.Status.PendingMode = AC.MODE[AC.lookupByteMapIndex(AC.MODE_MAP, 5, doc["SetMode"])];
+          AC.Status.Buffer04 = AC.Status.isee ? AC.Status.PendingMode + 0x08 : AC.Status.PendingMode;  // Optimistic HA (keep the i-See offset the report decode expects)
+          AC.Status.PendingModeUntil = millis() + AC_PENDING_HOLD_MS;
+        }
       }
       if (doc["SetFanSpeed"].is<const char*>()) {
         DEBUG_PRINTLN("SetFan");
@@ -2362,11 +2375,16 @@ void ACReport(void) {
   doc[F("Vane")] = AC.lookupByteMapValue(AC.VANE_MAP, AC.VANE, 7, AC.Status.vane);
   doc[F("wideVane")] = AC.lookupByteMapValue(AC.WIDEVANE_MAP, AC.WIDEVANE, 7, AC.Status.wideVane & 0x0F);
   doc[F("iSee")] = AC.Status.isee;
-  doc[F("mode")] = AC.lookupByteMapValue(AC.MODE_MAP, AC.MODE, 5, AC.Status.isee ? (AC.Status.Buffer04 - 0x08) : AC.Status.Buffer04);
-  if (!AC.Status.Operating) {
-    doc[F("action")] = "idle";
+  if (AC.Status.SystemPowerMode == 0x00) {  // Powered off - present as the HA climate "off" mode
+    doc[F("mode")] = "off";
+    doc[F("action")] = "off";
   } else {
-    doc[F("action")] = AC.lookupByteMapValue(AC.MODE_HA_MAP, AC.MODE, 5, AC.Status.isee ? (AC.Status.Buffer04 - 0x08) : AC.Status.Buffer04);
+    doc[F("mode")] = AC.lookupByteMapValue(AC.MODE_MAP, AC.MODE, 5, AC.Status.isee ? (AC.Status.Buffer04 - 0x08) : AC.Status.Buffer04);
+    if (!AC.Status.Operating) {
+      doc[F("action")] = "idle";
+    } else {
+      doc[F("action")] = AC.lookupByteMapValue(AC.MODE_HA_MAP, AC.MODE, 5, AC.Status.isee ? (AC.Status.Buffer04 - 0x08) : AC.Status.Buffer04);
+    }
   }
   doc[F("compressorFreq")] = AC.Status.CompressorFrequency;
 
