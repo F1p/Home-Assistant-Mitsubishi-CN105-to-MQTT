@@ -82,7 +82,7 @@
 
 #endif  // ESP8266 || ESP32
 
-String FirmwareVersion = "7.0.28";
+String FirmwareVersion = "7.0.29";
 String LatestFirmwareVersion;
 
 // Language for OTA Check
@@ -1165,6 +1165,10 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       StatusReport();
     } else if (Payload.toInt() == 995) {
       DEBUG_PRINTLN(F("Requested Bridge Firmware Update"));
+      if (WiFi.RSSI() < -75) {
+        update_summary = "Warning! WiFi signal weak";
+        UpdateReport();  // Send MQTT Status out
+      }
       if (NormalHWBoostOperating != 1 && LatestFirmwareVersion != FirmwareVersion) {
 #ifdef ESP32  // Define the M5Stack AtomS3
         InstallOTAUpdates();
@@ -1433,10 +1437,13 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       // Activation Of Mode per Zone (Bool)
       if (doc["zone1"]["active"].is<bool>()) {
         bool wc_z1_active = doc["zone1"]["active"];
-        if (!unitSettings.z1_active && wc_z1_active) {                                                    // On transition from Inactive > Active
-          if (HeatPump.Status.HeatingControlModeZ1 != 1) {                                                // Check if not already in Fixed Flow Mode
-            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z1);  // Swap to Fixed Flow for Onboard WC to input the flow temperature
-            HeatPump.Status.HeatingControlModeZ1 = HEATING_CONTROL_MODE_FLOW_TEMP;
+        if (!unitSettings.z1_active && wc_z1_active) {                                                         // On transition from Inactive > Active
+          if (HeatPump.Status.HeatCool == 0 && HeatPump.Status.HeatingControlModeZ1 != 1) {                    // Check if not already in Heating Mode Fixed Flow Mode
+            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z1);       // Swap to Fixed Flow for Onboard WC to input the flow temperature
+            HeatPump.Status.HeatingControlModeZ1 = HEATING_CONTROL_MODE_FLOW_TEMP;                             // Optimistic Write
+          } else if (HeatPump.Status.HeatCool == 1 && HeatPump.Status.HeatingControlModeZ1 != 4) {             // Check if not already in Cooling Mode Fixed Flow Mode
+            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_COOL_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z1);  // Swap to Fixed Flow for Onboard WC to input the flow temperature
+            HeatPump.Status.HeatingControlModeZ1 = HEATING_CONTROL_MODE_COOL_FLOW_TEMP;                        // Optimistic Write
           }
         }
         ModifyCompCurveState(1, wc_z1_active, 1, 0);  // State Save
@@ -1451,10 +1458,13 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
 
       if (doc["zone2"]["active"].is<bool>()) {
         bool wc_z2_active = doc["zone2"]["active"];
-        if (!unitSettings.z2_active && wc_z2_active) {                                                    // On transition from Inactive > Active
-          if (HeatPump.Status.HeatingControlModeZ2 != 1) {                                                // Check if not already in Fixed Flow Mode
-            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z2);  // Swap to Fixed Flow for Onboard WC to input the flow temperature
-            HeatPump.Status.HeatingControlModeZ2 = HEATING_CONTROL_MODE_FLOW_TEMP;
+        if (!unitSettings.z2_active && wc_z2_active) {                                                         // On transition from Inactive > Active
+          if (HeatPump.Status.HeatCool == 0 && HeatPump.Status.HeatingControlModeZ2 != 1) {                    // Check if not already in Fixed Flow Mode
+            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z2);       // Swap to Fixed Flow for Onboard WC to input the flow temperature
+            HeatPump.Status.HeatingControlModeZ2 = HEATING_CONTROL_MODE_FLOW_TEMP;                             // Optimistic Write
+          } else if (HeatPump.Status.HeatCool == 1 && HeatPump.Status.HeatingControlModeZ2 != 4) {             // Check if not already in Cooling Mode Fixed Flow Mode
+            HeatPump.SetHeatingControlMode(HEATING_CONTROL_MODE_COOL_FLOW_TEMP, SET_HEATING_CONTROL_MODE_Z2);  // Swap to Fixed Flow for Onboard WC to input the flow temperature
+            HeatPump.Status.HeatingControlModeZ2 = HEATING_CONTROL_MODE_COOL_FLOW_TEMP;                        // Optimistic Write
           }
         }
         ModifyCompCurveState(2, wc_z2_active, 1, 0);  // State Save
@@ -2678,12 +2688,12 @@ void CalculateCompCurve(void) {
 
     // Write the Flow Setpoints to Heat Pump
     if (unitSettings.z1_active && Flow_Inc_Count == 0 && HeatPump.Status.DHWActive != 1 && Z1_CurveFSP != HeatPump.Status.Zone1FlowTemperatureSetpoint) {
-      HeatPump.SetFlowSetpoint(Z1_CurveFSP, HEATING_CONTROL_MODE_FLOW_TEMP, ZONE1);
+      HeatPump.SetFlowSetpoint(Z1_CurveFSP, HeatPump.Status.HeatingControlModeZ1, ZONE1);
       write_thermostats();
       HeatPump.Status.Zone1FlowTemperatureSetpoint = Z1_CurveFSP;
     }
     if (unitSettings.z2_active && HeatPump.Status.Has2Zone && !HeatPump.Status.Simple2Zone && Z2_CurveFSP != HeatPump.Status.Zone2FlowTemperatureSetpoint) {  // User must have Complex 2 zone to set different flow temp in different zones
-      HeatPump.SetFlowSetpoint(Z2_CurveFSP, HEATING_CONTROL_MODE_FLOW_TEMP, ZONE2);
+      HeatPump.SetFlowSetpoint(Z2_CurveFSP, HeatPump.Status.HeatingControlModeZ2, ZONE2);
       write_thermostats();
       HeatPump.Status.Zone2FlowTemperatureSetpoint = Z2_CurveFSP;
     }
