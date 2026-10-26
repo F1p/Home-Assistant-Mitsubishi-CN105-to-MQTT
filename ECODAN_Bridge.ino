@@ -203,6 +203,9 @@ const unsigned long PostDHW_Window_ms = 900000;  // Post DHW flow letdown safety
 const float PostDHW_Descent_Offset = 0.5;        // During the letdown the flow setpoint is held this far BELOW the actual flow temperature (C), and it is also the hand-back point:
                                                  // the Comp Curve takes over as soon as flow - curve <= this. The FTC stops when flow > setpoint + 2.0C and flow reads in 0.5C steps,
                                                  // so 0.5 aims to survive the gap
+const unsigned long FlowFollow_Hold_ms = 600000;  // Anti-Stop following: 10min without another raise = the overshoot is not a transient, return to the Comp Curve
+const unsigned long FlowFollow_Step_ms = 300000;  // 5min between the 0.5C steps of that return
+bool FlowFollowReturning = false;                 // Returning to the Comp Curve, no more raises until the compressor stops (once per run)
 int lastResetDay = -1;
 const int OAT_Window_Size = 300;
 int OAT_readings[OAT_Window_Size];
@@ -437,6 +440,8 @@ unsigned long lockoutpreviousMillis = 0;         // variable for comparing milli
 unsigned long lockoutdurationMillis = 0;         // variable for comparing millis counter
 unsigned long compressorrundurationMillis = 0;   // variable for comparing millis counter
 unsigned long postdhwfspdurationMillis = 0;      // variable for comparing millis counter
+unsigned long flowfollowraiseMillis = 0;         // variable for comparing millis counter
+unsigned long flowfollowstepMillis = 0;          // variable for comparing millis counter
 unsigned long lastConsumedEnergyTimestamp = 0;   // variable for comparing millis counter
 unsigned long lastDeliveredEnergyTimestamp = 0;  // variable for comparing millis counter
 const unsigned long ENERGY_MAX_SAMPLE_MS = 60000;  // Longest interval the energy meter will integrate over (SystemReport runs every 2s, 30s at worst)
@@ -1022,6 +1027,7 @@ void loop() {
   if (Flow_Inc_Count > 0 && HeatPump.Status.HasAnsweredDips && HeatPump.Status.CompressorFrequency == 0 && !inDefrostWindow && HeatPump.Status.DHWActive != 1 && !PostDHWTimer && !DHWFlowFollowingActive) {
     ReleaseFlowFollowing();
   }
+  if (HeatPump.Status.CompressorFrequency == 0 && !inDefrostWindow) { FlowFollowReturning = false; }  // The run has ended, the next run may follow again
 
   // -- AC Webhook Writes -- //
   if (unitSettings.ac_remote_val_change) {
@@ -1064,7 +1070,7 @@ void loop() {
   // Not during the post DHW letdown: its setpoint sits below the flow on purpose, and this block would step it back up against the letdown.
   if (HeatPump.Status.HasAnsweredDips && HeatPump.Status.CompressorFrequency > 0 && HeatPump.Status.Zone1FlowTemperatureSetpoint > 0 && (HeatPump.Status.SystemOperationMode == 2 || HeatPump.Status.SystemOperationMode == 3) && unitSettings.shortcycleprotectionenabled && !PostDHWTimer) {
     if (HeatPump.Status.HeatCool == 0 && HeatPump.Status.HeatingControlModeZ1 == 1) {  // Heating and Fixed Flow
-      if ((HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1FlowTemperatureSetpoint > 1.0) && (FlowTemp_Last < HeatPump.Status.HeaterOutputFlowTemperature)) {
+      if (!FlowFollowReturning && (HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1FlowTemperatureSetpoint > 1.0) && (FlowTemp_Last < HeatPump.Status.HeaterOutputFlowTemperature)) {
         // On entry of a new high flow temperature
         if (Flow_Inc_Count == 0) {
           FlowTemp_Target = HeatPump.Status.Zone1FlowTemperatureSetpoint;
@@ -1076,6 +1082,7 @@ void loop() {
           write_thermostats();
           Flow_Inc_Count++;  // This will be cancelled at the next compressor stop
           FlowFollowingActive = true;
+          flowfollowraiseMillis = millis();  // Start of the hold before returning to the Comp Curve
         }
         if (HeatPump.Status.Zone1FlowTemperatureSetpoint < Z1_CurveFSP) {  // Cancel Flow Following if FSP exceeds Comp Curve Target
           FlowTemp_Target = HeatPump.Status.Zone1FlowTemperatureSetpoint;
@@ -1087,6 +1094,20 @@ void loop() {
         write_thermostats();
         Flow_Inc_Count--;                                          // This will be cancelled at the next compressor stop
         if (Flow_Inc_Count == 0) { FlowFollowingActive = false; }  // End Flow Following
+      } else if ((Flow_Inc_Count > 0) && (millis() - (FlowFollowReturning ? flowfollowstepMillis : flowfollowraiseMillis) >= (FlowFollowReturning ? FlowFollow_Step_ms : FlowFollow_Hold_ms))) {
+        // Return to the Comp Curve. If the flow has not fallen back by itself after the hold, the raise is no longer bridging a start up transient,
+        // it only holds the flow above the Comp Curve (the reducer above cannot fire while the flow sits 0.5C to 2.0C above the raised setpoint).
+        // Step down 0.5C at a time: the FTC lowers the frequency if it can, otherwise the outdoor unit stops once, at the end of a long run.
+        FlowFollowReturning = true;
+        flowfollowstepMillis = millis();
+        if (Flow_Inc_Count <= 1) {
+          ReleaseFlowFollowing();  // Last step, hand back the current Comp Curve value
+        } else {
+          HeatPump.SetFlowSetpoint((HeatPump.Status.Zone1FlowTemperatureSetpoint - 0.5), HeatPump.Status.HeatingControlModeZ1, ZONE1);  // Need to avoid overwriting by onboard weather curve..
+          HeatPump.Status.Zone1FlowTemperatureSetpoint -= 0.5;
+          write_thermostats();
+          Flow_Inc_Count--;
+        }
       }
     } else if (HeatPump.Status.HeatCool == 1 && HeatPump.Status.HeatingControlModeZ1 == 3) {  // Cooling
       if ((HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1FlowTemperatureSetpoint < -1.0) && (FlowTemp_Last > HeatPump.Status.HeaterOutputFlowTemperature)) {
@@ -2653,6 +2674,7 @@ void ActiveControlReport(void) {
   doc[F("ShortCycleProtectionEnabled")] = unitSettings.shortcycleprotectionenabled ? 1 : 0;
 
   if (FlowFollowingActive || Flow_Inc_Count > 0) { CycleProtectionStatus = "Anti-Stop Flow Temperature Following Active (" + String(Flow_Inc_Count * 0.5) + "C)"; }
+  if (FlowFollowReturning && Flow_Inc_Count > 0) { CycleProtectionStatus = "Anti-Stop Returning to Curve (" + String(Flow_Inc_Count * 0.5) + "C)"; }
   if (DHWFlowFollowingActive) { CycleProtectionStatus = "DHW Flow Temperature Following Active"; }
   if (PostDHWTimer) { CycleProtectionStatus = "Post DHW Flow Temperature Letdown Active"; }  // After the DHW line, so it takes over once Hot Water has ended
   if (ShortCycleProtectionActive) { CycleProtectionStatus = "Short Cycle Lockout Active"; }
