@@ -229,7 +229,7 @@ void readSettingsFromConfig() {
             }
             if (doc.containsKey(unitSettings.webauth_identifier)) {
               unitSettings.WebAuthEnabled = doc[unitSettings.webauth_identifier].as<bool>();
-            } else {                    // For upgrading from earlier firmware, create the entry (login stays enabled)
+            } else {                    // For upgrading from earlier firmware, create the entry (keeps the build default: login on for WiFi, off for Ethernet until a password is set)
               shouldSaveConfig = true;  // Save config after exit to update the file
             }
             DEBUG_PRINTLN(F("Parsed JSON: "));
@@ -491,6 +491,7 @@ void readSettingsFromConfig() {
 
 
   // Web interface login: disabled (empty password = no login), the password set from Home Assistant, otherwise the device ID (Serial Number in Home Assistant)
+  // Ethernet (WT32-ETH01) builds default to disabled, so first-time setup is not locked out; setting a password in Home Assistant enables the login
   void ApplyWebPortalAuth() {
     if (!unitSettings.WebAuthEnabled) {
       wifiManager.setWebPortalAuth("admin", "", "");

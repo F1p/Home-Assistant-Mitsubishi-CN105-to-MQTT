@@ -82,7 +82,7 @@
 
 #endif  // ESP8266 || ESP32
 
-String FirmwareVersion = "7.1.1";
+String FirmwareVersion = "7.1.2";
 String LatestFirmwareVersion;
 
 // Language for OTA Check
@@ -308,7 +308,13 @@ struct UnitSettings {
   char webpass_identifier[8] = "webpass";
   char WebPassword[webpass_max_length] = "";  // Web interface password set from Home Assistant, empty = disabled
   char webauth_identifier[8] = "webauth";
+#ifdef ARDUINO_WT32_ETH01
+  // Ethernet has no access point, so there is no first-time setup window where the device ID can be discovered.
+  // Stay open until a password is set from the Home Assistant "Web Interface Password" entity (which turns the login on).
+  bool WebAuthEnabled = false;
+#else
   bool WebAuthEnabled = true;  // False = login disabled (an empty password was sent from Home Assistant)
+#endif
   String CompCurve = "{\"base\":{\"zone1\":{\"curve\":[{\"flow\":60,\"outside\":-10},{\"flow\":35,\"outside\":0},{\"flow\":20,\"outside\":15},{\"flow\":10,\"outside\":20}]},\"zone2\":{\"curve\":[{\"flow\":60,\"outside\":-10},{\"flow\":35,\"outside\":0},{\"flow\":20,\"outside\":15}]}},\"zone1\":{\"active\":false,\"manual_offset\":0,\"temp_offset\": 0,\"wind_offset\":0},\"zone2\":{\"active\":false,\"manual_offset\":0,\"temp_offset\": 0,\"wind_offset\":0},\"use_local_outdoor\":true,\"max_flow_overshoot\": 3,\"fixedlockoutduration\": 0}";
   float z1_manual_offset = 0;
   float z1_wind_offset = 0;
@@ -317,6 +323,7 @@ struct UnitSettings {
   float z2_wind_offset = 0;
   float z2_temp_offset = 0;
   float cloud_outdoor = 0;
+  bool cloud_outdoor_valid = false;  // RAM only: a cloud outdoor temperature has been received since boot (0C is a valid reading, so the value alone cannot tell)
   bool use_local_outdoor = true;
   bool z1_active = false;
   bool z2_active = false;
@@ -996,22 +1003,27 @@ void loop() {
 
 
   // -- Outdoor Triggers on Outdoor Unit Change -- //
-  if (FrequencyLastLoop > 0 && HeatPump.Status.CompressorFrequency == 0) {                       // Transition of Compressor On to Off
-    HeatPump.WriteServiceCodeCMD(19);                                                            // Trigger Fan Speed Request Service Code
-    HeatPump.WriteServiceCodeCMD(20);                                                            // Trigger Fan Speed Request Service Code
-    if (HeatPump.Status.HasGeodan) { HeatPump.WriteServiceCodeCMD(28); }                         // For Geodan Only
-    if (HeatPump.Status.Defrost == 0) {                                                          // If Not Defrosting
-      CompressorPeriodDurations[1] = CompressorPeriodDurations[0];                               // Transfer Last Compressor Period to Array Pos 1
-      CompressorPeriodDurations[0] = (millis() / 1000) - CompressorStopStartTimer[0];            // Current Time from Stop > Stop (Seconds) to Array Pos 0
-      CompressorStopStartTimer[0] = (millis() / 1000);                                           // Last Compressor Stop Time (Seconds)
-      compressorrundurationMillis = CompressorStopStartTimer[0] - CompressorStopStartTimer[1];   // Last Compressor Run Duration (Seconds)
-      if (Flow_Inc_Count > 0) { ReleaseFlowFollowing(); }                                        // If its been manipulated, hand the setpoint back and reset the Flow Temp Incrementer
-    }                                                                                            //
-  } else if (FrequencyLastLoop == 0 && HeatPump.Status.CompressorFrequency > 0) {                // Transition of Compressor Off to On
-    HeatPump.WriteServiceCodeCMD(19);                                                            // Trigger Fan Speed Request Service Code
-    HeatPump.WriteServiceCodeCMD(20);                                                            // Trigger Fan Speed Request Service Code
-    if (HeatPump.Status.Defrost == 0) {                                                          // If Not Defrosting
-      CompressorStopStartTimer[1] = (millis() / 1000);                                           // Last Compressor Start Time (Seconds)
+  // FrequencyLastLoop starts at 0, so the first 0x04 reply with the compressor already running looks like a start edge. Edges are only acted on once the first full read is done
+  // (HasAnsweredDips), otherwise that false edge queues service codes 19/20 at boot and holds up the first read cycle with writes it does not need.
+  // FrequencyLastLoop is still updated every pass, so a compressor that was already running at boot is not treated as an edge later.
+  if (HeatPump.Status.HasAnsweredDips) {
+    if (FrequencyLastLoop > 0 && HeatPump.Status.CompressorFrequency == 0) {                       // Transition of Compressor On to Off
+      HeatPump.WriteServiceCodeCMD(19);                                                            // Trigger Fan Speed Request Service Code
+      HeatPump.WriteServiceCodeCMD(20);                                                            // Trigger Fan Speed Request Service Code
+      if (HeatPump.Status.HasGeodan) { HeatPump.WriteServiceCodeCMD(28); }                         // For Geodan Only
+      if (HeatPump.Status.Defrost == 0) {                                                          // If Not Defrosting
+        CompressorPeriodDurations[1] = CompressorPeriodDurations[0];                               // Transfer Last Compressor Period to Array Pos 1
+        CompressorPeriodDurations[0] = (millis() / 1000) - CompressorStopStartTimer[0];            // Current Time from Stop > Stop (Seconds) to Array Pos 0
+        CompressorStopStartTimer[0] = (millis() / 1000);                                           // Last Compressor Stop Time (Seconds)
+        compressorrundurationMillis = CompressorStopStartTimer[0] - CompressorStopStartTimer[1];   // Last Compressor Run Duration (Seconds)
+        if (Flow_Inc_Count > 0) { ReleaseFlowFollowing(); }                                        // If its been manipulated, hand the setpoint back and reset the Flow Temp Incrementer
+      }                                                                                            //
+    } else if (FrequencyLastLoop == 0 && HeatPump.Status.CompressorFrequency > 0) {                // Transition of Compressor Off to On
+      HeatPump.WriteServiceCodeCMD(19);                                                            // Trigger Fan Speed Request Service Code
+      HeatPump.WriteServiceCodeCMD(20);                                                            // Trigger Fan Speed Request Service Code
+      if (HeatPump.Status.Defrost == 0) {                                                          // If Not Defrosting
+        CompressorStopStartTimer[1] = (millis() / 1000);                                           // Last Compressor Start Time (Seconds)
+      }
     }
   }
   FrequencyLastLoop = HeatPump.Status.CompressorFrequency;
@@ -1353,8 +1365,11 @@ void HeatPumpQuerySVCEngine(void) {
 void WriteStateEngine(void) {
   if (HeatPump.PrevConnected && HeatPump.Status.HasAnsweredDips) {  // Writes use settings recorded during the first read cycle, so wait for it
     HeatPump.WriteStateMachine();
-  } else if (AC.PrevConnected) {
-    AC.WriteStateMachine();
+  } else {
+    // A2W writes are held until the first read cycle is complete, and WriteStateMachine() is what normally clears a read pause,
+    // so clear it here or a pause latched before the first full read never lifts.
+    if (HeatPump.PrevConnected) { HeatPump.PauseStateMachine = false; }
+    if (AC.PrevConnected) { AC.WriteStateMachine(); }
   }
 }
 
@@ -1741,9 +1756,11 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       // Room Influence is Enabled/Disabled
       if (doc["zone1"]["room_influence_active"].is<bool>()) {
         unitSettings.z1_room_influence_active = doc["zone1"]["room_influence_active"];
+        ModifyCompCurveState(1, unitSettings.z1_room_influence_active, 8, 0);  // State Save
       }
       if (doc["zone1"]["use_local_tsensor"].is<bool>()) {
         unitSettings.z1_use_local_sensor = doc["zone1"]["use_local_tsensor"];
+        ModifyCompCurveState(1, unitSettings.z1_use_local_sensor, 9, 0);  // State Save
       }
 
       if (doc["zone2"]["active"].is<bool>()) {
@@ -1762,9 +1779,11 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       // Room Influence is Enabled/Disabled
       if (doc["zone2"]["room_influence_active"].is<bool>()) {
         unitSettings.z2_room_influence_active = doc["zone2"]["room_influence_active"];
+        ModifyCompCurveState(2, unitSettings.z2_room_influence_active, 8, 0);  // State Save
       }
       if (doc["zone2"]["use_local_tsensor"].is<bool>()) {
         unitSettings.z2_use_local_sensor = doc["zone2"]["use_local_tsensor"];
+        ModifyCompCurveState(2, unitSettings.z2_use_local_sensor, 9, 0);  // State Save
       }
 
       // Local or Remote Outdoor Temperature Measurement (Bool)
@@ -1824,7 +1843,10 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       }  // Room Influence Temperature Sensor
 
 
-      if (doc["cloud_outdoor"].is<float>()) { unitSettings.cloud_outdoor = doc["cloud_outdoor"]; }  // Temperature Provided by a remote or cloud source when use_local_outdoor = False
+      if (doc["cloud_outdoor"].is<float>()) {  // Temperature Provided by a remote or cloud source when use_local_outdoor = False
+        unitSettings.cloud_outdoor = doc["cloud_outdoor"];
+        unitSettings.cloud_outdoor_valid = true;  // Not saved: after a reboot the local sensor is used until the next value arrives
+      }
 
 
       FlowFollowingActive = false;
@@ -3006,11 +3028,16 @@ void CalculateCompCurve(void) {
       unitSettings.use_local_outdoor = doc["use_local_outdoor"];
       unitSettings.max_flow_overshoot = doc["max_flow_overshoot"];
       unitSettings.fixedlockoutduration = doc["fixedlockoutduration"];
+      unitSettings.z1_room_influence_active = doc["zone1"]["room_influence_active"];  // Room Influence state survives a reboot (missing key = off)
+      unitSettings.z1_use_local_sensor = doc["zone1"]["use_local_tsensor"];
+      unitSettings.z2_room_influence_active = doc["zone2"]["room_influence_active"];
+      unitSettings.z2_use_local_sensor = doc["zone2"]["use_local_tsensor"];
 
 
       float OutsideAirTemperature = 0;
 
-      if (!unitSettings.use_local_outdoor && (MQTTClient1.connected() || MQTTClient2.connected())) {  // Determine Outdoor Temperature Input
+      // The cloud temperature is only used once one has been received since boot (it starts at 0, which is not a measurement). Until then the local sensor is used.
+      if (!unitSettings.use_local_outdoor && unitSettings.cloud_outdoor_valid && (MQTTClient1.connected() || MQTTClient2.connected())) {  // Determine Outdoor Temperature Input
         OutsideAirTemperature = unitSettings.cloud_outdoor;
       } else {
         if (inDefrostWindow) {  // To allow sensor to stabilise after influence from the defrost
@@ -3078,14 +3105,20 @@ void CalculateCompCurve(void) {
         unitSettings.z1_room_temperature = HeatPump.Status.Zone1Temperature;
         unitSettings.z1_room_setpoint = HeatPump.Status.Zone1TemperatureSetpoint;
       }
-      Z1_Room_Offset = calculateRoomInfluence(unitSettings.z1_room_temperature, unitSettings.z1_room_setpoint, 1.5);
+      // Room temperature and setpoint are not saved, so after a reboot they are 0 until Home Assistant (webhook/MQTT) or the FTC supplies them.
+      // Only apply the offset once both are present, otherwise one of them being 0 looks like a huge error (e.g. 21C setpoint = +31C flow)
+      if (unitSettings.z1_room_temperature > 0 && unitSettings.z1_room_setpoint > 0) {
+        Z1_Room_Offset = calculateRoomInfluence(unitSettings.z1_room_temperature, unitSettings.z1_room_setpoint, 1.5);
+      }
     }
     if (unitSettings.z2_room_influence_active && unitSettings.z2_active && HeatPump.Status.Has2Zone && !HeatPump.Status.Simple2Zone) {
       if (unitSettings.z2_use_local_sensor) {
         unitSettings.z2_room_temperature = HeatPump.Status.Zone2Temperature;
         unitSettings.z2_room_setpoint = HeatPump.Status.Zone2TemperatureSetpoint;
       }
-      Z2_Room_Offset = calculateRoomInfluence(unitSettings.z2_room_temperature, unitSettings.z2_room_setpoint, 1.5);
+      if (unitSettings.z2_room_temperature > 0 && unitSettings.z2_room_setpoint > 0) {  // As Zone 1, wait until both values are present
+        Z2_Room_Offset = calculateRoomInfluence(unitSettings.z2_room_temperature, unitSettings.z2_room_setpoint, 1.5);
+      }
     }
 
     // Apply Post Calculation Offsets to Calculated Curve Flow Setpoint
@@ -3117,7 +3150,7 @@ float calculateRoomInfluence(float actual, float setpoint, float gain) {
 }
 
 void ModifyCompCurveState(int Zone, bool Active, int ModType, float Value) {
-  // Mod Types: 1 = Activate, 2 = manual_offset, 3 = temp_offset, 4 = wind_offset, 5 = use_local_outdoor, 6 = max_flow_overshoot, 7 = fixed lockout duration
+  // Mod Types: 1 = Activate, 2 = manual_offset, 3 = temp_offset, 4 = wind_offset, 5 = use_local_outdoor, 6 = max_flow_overshoot, 7 = fixed lockout duration, 8 = room_influence_active, 9 = use_local_tsensor
   JsonDocument local_stored_doc;                                                           // Variable for the locally decoded JSON
   DeserializationError error = deserializeJson(local_stored_doc, unitSettings.CompCurve);  // Unpack the local stored JSON document
   if (error) {
@@ -3145,6 +3178,10 @@ void ModifyCompCurveState(int Zone, bool Active, int ModType, float Value) {
       local_stored_doc["max_flow_overshoot"] = Value;
     } else if (ModType == 7) {
       local_stored_doc["fixedlockoutduration"] = Value;
+    } else if (ModType == 8) {
+      local_stored_doc[target_zone]["room_influence_active"] = Active;
+    } else if (ModType == 9) {
+      local_stored_doc[target_zone]["use_local_tsensor"] = Active;
     }
   }
   local_stored_doc.shrinkToFit();
