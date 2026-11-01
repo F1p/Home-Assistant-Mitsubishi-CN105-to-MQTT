@@ -479,6 +479,7 @@ extern int ACCurrentWriteAttempt;
 byte NormalHWBoostOperating = 0;
 uint8_t FTCVersionLastLoop = 0;
 uint8_t ACC9LastLoop = 0;
+bool ACHeatLowRangeLastLoop = false;  // A2A Heat mode (10C setpoint minimum) at the last loop
 uint8_t FrequencyLastLoop = 0;
 double cumulativeEnergyToday[6] = { 0, 0, 0, 0, 0, 0 };      // Format: Heating Consumed, Cooling Consumed, DHW Consumed, Heating Delivered, Cooling Delivered, DHW Delivered
 double cumulativeEnergyYesterday[6] = { 0, 0, 0, 0, 0, 0 };  // Format: Heating Consumed, Cooling Consumed, DHW Consumed, Heating Delivered, Cooling Delivered, DHW Delivered
@@ -985,6 +986,12 @@ void loop() {
     if (MQTTReconnect()) { PublishA2ADiscoveryTopics(1, MQTT_BASETOPIC); }
     if (MQTT2Reconnect()) { PublishA2ADiscoveryTopics(2, MQTT_2_BASETOPIC); }
   }
+  const bool ACHeatLowRangeNow = ACHeatLowRange();
+  if (AC.PrevConnected && ACHeatLowRangeNow != ACHeatLowRangeLastLoop) {                              // Heat mode lowers the A2A climate minimum setpoint to 10C, other modes 16C
+    if (MQTTReconnect()) { PublishA2ADiscoveryTopics(1, MQTT_BASETOPIC, AC_CLIMATE_ENTITY); }        // Only the climate entity is re-published
+    if (MQTT2Reconnect()) { PublishA2ADiscoveryTopics(2, MQTT_2_BASETOPIC, AC_CLIMATE_ENTITY); }
+  }
+  ACHeatLowRangeLastLoop = ACHeatLowRangeNow;
   FTCVersionLastLoop = HeatPump.Status.FTCVersion;  // On FTC version capture, if criteria met then change
   ACC9LastLoop = AC.Status.C9;
 
