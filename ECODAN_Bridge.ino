@@ -460,6 +460,7 @@ bool CableConnected = true;
 bool WiFiConnectedLastLoop = false;
 bool PostWriteTrigger = false;
 bool PostDHWTimer = false;
+bool DHWFollowedThisRun = false;  // Latched when DHW flow following ran in this Hot Water run, consumed when the post DHW letdown starts
 bool CompressorRunningLastLoop = false;
 bool shortcycleprotectionexit = false;
 int ShortCycleCauseNumber = 0;
@@ -467,6 +468,7 @@ uint8_t shortcycleprotection_svc_pre[6] = { 0, 0, 0, 0, 0, 0 };  // Format: SCM,
 uint8_t dhw_svc_pre[6] = { 0, 0, 0, 0, 0, 0 };                   // Format: SCM, DHW, Z1H, Z1C, Z2H, Z2C
 unsigned long CompressorStopStartTimer[2] = { 0, 0 };            // Compressor Last Stop Time, Compressor Last Start Time
 unsigned long CompressorPeriodDurations[2] = { 0, 0 };           // Last 2 Compressor Periods
+bool CompressorPeriodsChanged = false;                           // Set when a new compressor period is recorded (or Short Cycle Protection is switched on), so each pair of periods is only evaluated once
 
 extern int cmd_queue_length;
 extern int cmd_queue_position;
@@ -962,12 +964,13 @@ void loop() {
     WriteInProgress = true;      // Wait For OK
     NormalHWBoostOperating = 0;  // Don't enter again
   }
-  if ((HeatPump.Status.LastSystemOperationMode == 1 && HeatPump.Status.SystemOperationMode != 1) || (HeatPump.Status.LastSystemOperationMode == 6 && HeatPump.Status.SystemOperationMode != 6) && DHWFlowFollowingActive) {
+  if (((HeatPump.Status.LastSystemOperationMode == 1 && HeatPump.Status.SystemOperationMode != 1) || (HeatPump.Status.LastSystemOperationMode == 6 && HeatPump.Status.SystemOperationMode != 6)) && (DHWFlowFollowingActive || DHWFollowedThisRun)) {
     PostDHWTimer = true;                                                 // Start timing
     postdhwfspdurationMillis = millis();                                 // Start the post DHW timer
+    DHWFollowedThisRun = false;                                          // Consumed
   }                                                                      // For Onboard Comp Curve, recalculate FSP to prevent outdoor stopping
   if (PostDHWTimer) {         // Window after DHW: no fixed hold time as the flow temperature fall rate depends on the installation
-    post_dhw_flow_follower();  // Keeps FSP above the actual flow for up to 5min, then hands back to the Comp Curve
+    post_dhw_flow_follower();  // Holds FSP 0.5C below the actual flow until the Comp Curve is reachable (15min safety cap), then hands back to the Comp Curve
   }
 
   // -- Defrost Handler -- //
@@ -1021,6 +1024,7 @@ void loop() {
       if (HeatPump.Status.Defrost == 0) {                                                          // If Not Defrosting
         CompressorPeriodDurations[1] = CompressorPeriodDurations[0];                               // Transfer Last Compressor Period to Array Pos 1
         CompressorPeriodDurations[0] = (millis() / 1000) - CompressorStopStartTimer[0];            // Current Time from Stop > Stop (Seconds) to Array Pos 0
+        CompressorPeriodsChanged = true;                                                           // New pair of periods to evaluate for short cycling
         CompressorStopStartTimer[0] = (millis() / 1000);                                           // Last Compressor Stop Time (Seconds)
         compressorrundurationMillis = CompressorStopStartTimer[0] - CompressorStopStartTimer[1];   // Last Compressor Run Duration (Seconds)
         if (Flow_Inc_Count > 0) { ReleaseFlowFollowing(); }                                        // If its been manipulated, hand the setpoint back and reset the Flow Temp Incrementer
@@ -1050,7 +1054,8 @@ void loop() {
 
   // -- Short Cycling Protection -- //
   // Definition of Short Cycle if there is 2 Compressor Periods in less than 20min (Stop > Run > Stop x2)
-  if (!ShortCycleProtectionActive && (CompressorPeriodDurations[0] > 0 && CompressorPeriodDurations[1] > 0) && (CompressorPeriodDurations[0] + CompressorPeriodDurations[1] < 1200)) {                                                         // Compressor Period < 20min (6 drops/hr)                                                                                                                                                                  // If enabled, count eq or greater than detection threshold and not active already
+  if (CompressorPeriodsChanged && !ShortCycleProtectionActive && (CompressorPeriodDurations[0] > 0 && CompressorPeriodDurations[1] > 0) && (CompressorPeriodDurations[0] + CompressorPeriodDurations[1] < 1200)) {                                                         // Compressor Period < 20min (6 drops/hr)                                                                                                                                                                  // If enabled, count eq or greater than detection threshold and not active already
+    CompressorPeriodsChanged = false;  // Evaluated, don't repeat (or republish) until the next compressor stop
     lockoutdurationMillis = map((CompressorPeriodDurations[0] + CompressorPeriodDurations[1]), 0, 1200, 600000, 1200000);                                                                                                                      // 0s Period = 10min lock, 1200s = 20min lockout
     if (unitSettings.fixedlockoutduration > 0) { lockoutdurationMillis = unitSettings.fixedlockoutduration * 60000; }                                                                                                                          // Overwrite auto calculation if fixed duration is specified
     lockoutpreviousMillis = millis();                                                                                                                                                                                                          // Start the timer
@@ -1062,7 +1067,7 @@ void loop() {
       HeatPump.Status.SvrControlMode = 1;                                      // Write Server Control Mode + Prohibits
     }
 
-    if (abs(HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1TemperatureSetpoint) > 4) {
+    if (HeatPump.Status.Zone1FlowTemperatureSetpoint > 0 && abs(HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1FlowTemperatureSetpoint) > 4) {
       ShortCycleCauseNumber = 1;
     } else if (HeatPump.Status.SystemOperationMode == 0) {
       ShortCycleCauseNumber = 2;
@@ -1107,14 +1112,14 @@ void loop() {
         Flow_Inc_Count--;                                          // This will be cancelled at the next compressor stop
         if (Flow_Inc_Count == 0) { FlowFollowingActive = false; }  // End Flow Following
       }
-    } else if (HeatPump.Status.HeatCool == 1 && HeatPump.Status.HeatingControlModeZ1 == 3) {  // Cooling
+    } else if (HeatPump.Status.HeatCool == 1 && HeatPump.Status.HeatingControlModeZ1 == HEATING_CONTROL_MODE_COOL_FLOW_TEMP) {  // Cooling and Fixed Flow
       if ((HeatPump.Status.HeaterOutputFlowTemperature - HeatPump.Status.Zone1FlowTemperatureSetpoint < -1.0) && (FlowTemp_Last > HeatPump.Status.HeaterOutputFlowTemperature)) {
         // On entry of a new high flow temperature
         if (Flow_Inc_Count == 0) {
           FlowTemp_Target = HeatPump.Status.Zone1FlowTemperatureSetpoint;
           FlowFollowingActive = false;
         }                                                                                                                               // On First entry, set flow setpoint before
-        if (Flow_Inc_Count < (unitSettings.max_flow_overshoot / 0.5)) {                                                                 // Maximum increases is -0.5C * 5 = -2.5C
+        if (Flow_Inc_Count < (unitSettings.max_flow_overshoot / 0.5)) {                                                                 // Maximum decreases is 0.5C * setting
           HeatPump.SetFlowSetpoint((HeatPump.Status.Zone1FlowTemperatureSetpoint - 0.5), HeatPump.Status.HeatingControlModeZ1, ZONE1);  // Need to avoid overwriting by onboard weather curve..
           HeatPump.Status.Zone1FlowTemperatureSetpoint -= 0.5;
           write_thermostats();
@@ -1493,6 +1498,7 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
       if (!unitSettings.shortcycleprotectionenabled) {
         DEBUG_PRINTLN(F("ENABLED"));
         unitSettings.shortcycleprotectionenabled = true;
+        CompressorPeriodsChanged = true;  // Evaluate the last two compressor periods straight away
         SvcReply = 1;
       } else if (unitSettings.shortcycleprotectionenabled) {
         DEBUG_PRINTLN(F("DISABLED"));
@@ -1863,6 +1869,7 @@ void MQTTonData(char* topic, byte* payload, unsigned int length) {
     MQTTWriteReceived("MQTT Set Active Control", 15);
     if (Payload.toInt() == 1) {
       unitSettings.shortcycleprotectionenabled = true;
+      CompressorPeriodsChanged = true;  // Evaluate the last two compressor periods straight away
     } else if (Payload.toInt() == 0) {
       unitSettings.shortcycleprotectionenabled = false;
       shortcycleprotectionexit = true;
@@ -2952,6 +2959,7 @@ void dhw_flow_follower() {
     HeatPump.SetFlowSetpoint(HeatPump.Status.HeaterOutputFlowTemperature, HEATING_CONTROL_MODE_FLOW_TEMP, ZONE1);  // In Hot Water mode, keep FSP following Actual
     write_thermostats();
     DHWFlowFollowingActive = true;
+    DHWFollowedThisRun = true;  // Latched: this 30s timer clears DHWFlowFollowingActive, possibly before the system operation mode change is seen
   } else {
     DHWFlowFollowingActive = false;
   }
